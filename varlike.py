@@ -1653,19 +1653,42 @@ def qurey_keyparts_carton():
 def qurey_keyparts_rework():
     list_sn = []
     rework = None
+    groups = {}
     def query_callback(rewk):
-        nonlocal list_sn,rework
+        nonlocal list_sn,rework,groups
         rework = rewk
         result_msg, columns, rows = module_oracle.fetch_keyparts_rework(rewk)
         if result_msg == 'OK':
             if rows:
                 try:
-                    sn_index = columns.index("SERIAL_NUMBER")
-                    list_sn = [row[sn_index] for row in rows]
-                    list_sn = list(dict.fromkeys(list_sn))
+                    sn_idx = columns.index("SERIAL_NUMBER")
+                    wo_idx = columns.index("WORK_ORDER")
+                    process_idx = columns.index("PROCESS_NAME")
                 except ValueError:
-                    list_sn = []
-                ui_table_tree(columns, rows,keyarts_menu)
+                    messagebox.showerror("错误", "缺少必要的列")
+                    return
+                # 构建分组: key=(wo, process), value=list of sn
+                groups = {}
+                all_sn = []
+                for row in rows:
+                    sn = row[sn_idx]
+                    wo = row[wo_idx]
+                    process = row[process_idx]
+                    all_sn.append(sn)
+                    key = (wo, process)
+                    groups.setdefault(key, []).append(sn)
+
+                # 去重
+                list_sn = list(dict.fromkeys(all_sn))
+                for key in groups:
+                    groups[key] = list(dict.fromkeys(groups[key]))
+                # 构建显示数据：每行 (WORK_ORDER, PROCESS_NAME, 合并的SN字符串)
+                display_rows = []
+                for (wo, process), sn_list in groups.items():
+                    sns_str = ', '.join(sn_list)
+                    display_rows.append((wo, process, sns_str))
+                display_columns = ['WORK_ORDER', 'PROCESS_NAME', 'SERIAL_NUMBER']
+                ui_table_tree(display_columns, display_rows, keyarts_menu)
             else:
                 messagebox.showinfo("查询结果", "没有查询到数据")
         else:
@@ -1687,7 +1710,7 @@ def qurey_keyparts_rework():
         msg = module_oracle.delete_keyparts_wo_process(wo,process,list_sn)
         if msg == "OK":
             messagebox.showinfo("成功", "删除成功")
-            query_callback(cartonc)
+            query_callback(rework)
         else:
             messagebox.showerror("错误", f"删除失败: {msg}")
     _ui_input_one("查询 重工编号下的SN的料件 ",query_callback,"重工编号 :")
