@@ -129,7 +129,7 @@ def update_question_status(record_id, reply, emp_no):
     :param record_id: 记录索引 (NUMBERINDEX)
     :param reply: 状态值 (REWORK_NO)
     :param user: 当前用户工号 (EMP_NO)
-    :return: (success, message)
+    :return: message
     """
     try:
         with oracledb.connect(user=username, password=password, dsn=dsn) as conn:
@@ -144,12 +144,12 @@ def update_question_status(record_id, reply, emp_no):
                 cursor.execute(sql, emp_no=emp_no, reply=reply, record_id=record_id)
                 conn.commit()
                 if cursor.rowcount == 0:
-                    return False, "未找到对应的记录，更新失败"
-                return True, "更新成功"
+                    return "未找到对应的记录，更新失败"
+                return "OK"
     except oracledb.Error as e:
-        return False, f"数据库错误: {e}"
+        return f"数据库错误: {e}"
     except Exception as e:
-        return False, str(e)
+        return f"错误: {e}"
 def get_routeR_dip_pack(dip,pack):
     """
     调用 SAJET.SJ_GET_R_ROUTE 存储过程
@@ -195,12 +195,11 @@ def insert_routeR_DIP_PACK(dip,pack,router,emp_no):
     try:
         with oracledb.connect(user=username, password=password, dsn=dsn) as conn:
             with conn.cursor() as cursor:
-                # 创建输出变量 (TRES)
                 result_var = cursor.var(oracledb.DB_TYPE_VARCHAR)
-                # 调用存储过程，传入4个输入 + 1个输出
                 cursor.callproc("SAJET.SJ_INSERT_R_ROUTE",
                                 [dip, pack, router, emp_no, result_var])
                 result_msg = result_var.getvalue()
+                conn.commit()
                 return result_msg
     except oracledb.Error as e:
         return f"数据库错误: {e}"
@@ -1126,6 +1125,306 @@ def update_woder_status(wo, status):
                     return "OK"
                 else:
                     return "未找到工单，更新失败"
+    except oracledb.Error as e:
+        return f"数据库错误: {e}"
+    except Exception as e:
+        return f"异常: {e}"
+def fetch_smt_reelup(line, site, sn, time=3):
+    """
+    查询 SMT 飞达上料信息（远程表）。
+    :param line: 线别 (STRLINEID)
+    :param site: 站点 (STRSITE)
+    :param sn:   飞达 SN (STRREELUPSN)
+    :param time: 时间范围（天数），默认 3 天，查询 LOADRELLDATE >= TRUNC(SYSDATE)-time
+    :return: (msg, columns, rows)
+             msg: 'OK' 或错误信息
+             columns: 列名列表
+             rows: 数据行列表
+    """
+    if ((not line or not site) and not sn):
+        return "请至少输入线别+站点组合，或输入SN", [], []
+
+    # 时间参数验证
+    try:
+        time = int(time)
+        if time < 0:
+            return "时间范围不能为负数", [], []
+    except (TypeError, ValueError):
+        return "时间参数必须为整数", [], []
+
+    sql = """
+        SELECT *
+        FROM TBL_SMT_REELUPINFO@smt T
+        WHERE (T.STRLINEID = :line AND T.STRSITE = :site AND T.LOADRELLDATE >= TRUNC(SYSDATE) - :time)
+           OR T.STRREELUPSN = :sn
+    """
+    try:
+        with oracledb.connect(user=username, password=password, dsn=dsn) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(sql, line=line, site=site, sn=sn, time=time)
+                rows = cursor.fetchall()
+                columns = [desc[0] for desc in cursor.description] if rows else []
+                return "OK", columns, rows
+    except oracledb.Error as e:
+        return f"数据库错误: {e}", [], []
+    except Exception as e:
+        return f"异常: {e}", [], []
+def delete_smt_reelup(index, sn):
+    """
+    根据 NUMINDEX 删除 TBL_SMT_REELUPINFO@smt 中的记录。
+    删除前检查该 SN 对应的记录总数，必须 >= 2 才允许删除（确保至少留有一条）。
+    :param index: 记录主键索引 (NUMINDEX)
+    :param sn:    料盘 SN (STRREELUPSN)
+    :return: 'OK' 或错误信息字符串
+    """
+    if index is None:
+        return "索引不能为空"
+    if not sn:
+        return "SN 不能为空"
+
+    try:
+        index = int(index)
+    except (TypeError, ValueError):
+        return "索引必须为数字"
+
+    try:
+        with oracledb.connect(user=username, password=password, dsn=dsn) as conn:
+            with conn.cursor() as cursor:
+                # 1. 查询该 SN 的记录总数
+                count_sql = "SELECT COUNT(*) FROM TBL_SMT_REELUPINFO@smt WHERE STRREELUPSN = :sn"
+                cursor.execute(count_sql, sn=sn)
+                count = cursor.fetchone()[0]
+                if count < 2:
+                    return f"该料盘SN({sn})记录数不足，当前 {count} 条，至少需要2条才能删除"
+
+                # 2. 执行删除
+                del_sql = "DELETE FROM TBL_SMT_REELUPINFO@smt T WHERE T.NUMINDEX = :index"
+                cursor.execute(del_sql, index=index)
+                rowcount = cursor.rowcount
+                conn.commit()
+                if rowcount > 0:
+                    return "OK"
+                else:
+                    return f"未找到 NUMINDEX={index} 的记录，删除失败"
+    except oracledb.Error as e:
+        return f"数据库错误: {e}"
+    except Exception as e:
+        return f"异常: {e}"
+def fetch_lenovo_carton(carton):
+    """
+    查询联想装箱信息。若 carton 为空则查询全部，否则按箱号过滤。
+    :param carton: 箱号
+    :return: (msg, columns, rows)
+             msg: 'OK' 或错误信息
+             columns: 列名列表
+             rows: 数据行列表
+    """
+    sql_base = """
+        SELECT L.CARTON_NO,
+               P.PART_NO,
+               E.PDLINE_NAME,
+               L.CLOSE_FLAG,
+               L.CARTON_QTY,
+               L.CREATE_TIME,
+               L.TERMINAL_ID,
+               L.OPTION_NUM1,
+               T.TERMINAL_NAME
+        FROM SAJET.G_PACK_CARTON_LENOVO L
+        LEFT JOIN SAJET.SYS_PART P ON P.PART_ID = L.MODEL_ID
+        LEFT JOIN SAJET.SYS_PDLINE E ON E.PDLINE_ID = L.PDLINE_ID
+        LEFT JOIN SAJET.SYS_TERMINAL T ON T.TERMINAL_ID = L.TERMINAL_ID
+    """
+
+    if carton:
+        sql = sql_base + " WHERE L.CARTON_NO = :carton"
+        bind_vars = {'carton': carton}
+    else:
+        sql = sql_base
+        bind_vars = {}
+
+    try:
+        with oracledb.connect(user=username, password=password, dsn=dsn) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(sql, bind_vars)
+                rows = cursor.fetchall()
+                columns = [desc[0] for desc in cursor.description] if rows else []
+                return "OK", columns, rows
+    except oracledb.Error as e:
+        return f"数据库错误: {e}", [], []
+    except Exception as e:
+        return f"异常: {e}", [], []
+def fetch_lenovo_carton_sn(carton):
+    """
+    查询联想箱号对应的 SN 列表。若 carton 为空则返回错误。
+    :param carton: 箱号
+    :return: (msg, columns, rows)
+             msg: 'OK' 或错误信息
+             columns: 列名列表
+             rows: 数据行列表
+    """
+    if not carton:
+        return "箱号不能为空", [], []
+
+    sql = "SELECT * FROM SAJET.LENOVO_CARTON_SN WHERE CARTON_NO = :carton"
+    try:
+        with oracledb.connect(user=username, password=password, dsn=dsn) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(sql, carton=carton)
+                rows = cursor.fetchall()
+                columns = [desc[0] for desc in cursor.description] if rows else []
+                return "OK", columns, rows
+    except oracledb.Error as e:
+        return f"数据库错误: {e}", [], []
+    except Exception as e:
+        return f"异常: {e}", [], []
+def update_lenovo_status(carton, status):
+    """
+    更新联想装箱表的 CLOSE_FLAG 状态。
+    :param carton: 箱号
+    :param status: 状态值（CLOSE_FLAG）
+    :return: 'OK' 或错误信息字符串
+    """
+    if not carton:
+        return "箱号不能为空"
+    if status is None:
+        return "状态不能为空"
+
+    sql = """
+        UPDATE SAJET.G_PACK_CARTON_LENOVO L
+        SET L.CLOSE_FLAG = :status
+        WHERE L.CARTON_NO = :carton
+    """
+    try:
+        with oracledb.connect(user=username, password=password, dsn=dsn) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(sql, status=status, carton=carton)
+                rowcount = cursor.rowcount
+                conn.commit()
+                if rowcount > 0:
+                    return "OK"
+                else:
+                    return f"未找到箱号 {carton}，更新失败"
+    except oracledb.Error as e:
+        return f"数据库错误: {e}"
+    except Exception as e:
+        return f"异常: {e}"
+def delete_lenovo_carton_sn(carton):
+    """
+    先删除联想箱号对应的所有 SN 记录，成功后更新主表 OPTION_NUM1 为 0。
+    :param carton: 箱号
+    :return: 'OK' 或错误信息字符串
+    """
+    if not carton:
+        return "箱号不能为空"
+
+    delete_sql = "DELETE FROM SAJET.LENOVO_CARTON_SN WHERE CARTON_NO = :carton"
+    update_sql = """
+        UPDATE SAJET.G_PACK_CARTON_LENOVO
+        SET OPTION_NUM1 = 0
+        WHERE CARTON_NO = :carton
+    """
+
+    try:
+        with oracledb.connect(user=username, password=password, dsn=dsn) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(delete_sql, carton=carton)
+                cursor.execute(update_sql, carton=carton)
+                conn.commit()
+                return "OK"
+    except oracledb.Error as e:
+        return f"数据库错误: {e}"
+    except Exception as e:
+        return f"异常: {e}"
+def update_erp_asus():
+    """
+    执行存储过程 SAJET.erp_to_sfis_asus（无参数）。
+    :return: 'OK' 或错误信息字符串
+    """
+    try:
+        with oracledb.connect(user=username, password=password, dsn=dsn) as conn:
+            with conn.cursor() as cursor:
+                cursor.callproc("SAJET.erp_to_sfis_asus")
+                conn.commit()
+                return "OK"
+    except oracledb.Error as e:
+        return f"数据库错误: {e}"
+    except Exception as e:
+        return f"异常: {e}"
+def insert_user_action(user_no, user_action, target=None, status=None, ip_address=None):
+    """
+    调用存储过程 SAJET.INSERT_VARLIKE_ACTION_LOG 插入用户操作日志。
+    :param user_no:     工号（EMP_NO）
+    :param user_action: 操作类型
+    :param target:      操作目标（可选）
+    :param status:      执行结果（可选）
+    :param ip_address:  客户端IP（可选）
+    :return: 'OK' 或错误信息字符串
+    """
+    if not user_no or not user_action:
+        return "工号和操作类型不能为空"
+
+    try:
+        with oracledb.connect(user=username, password=password, dsn=dsn) as conn:
+            with conn.cursor() as cursor:
+                tres_var = cursor.var(oracledb.DB_TYPE_VARCHAR)
+                cursor.callproc(
+                    "SAJET.INSERT_VARLIKE_ACTION_LOG",
+                    [user_no, user_action, target, status, ip_address, tres_var]
+                )
+                conn.commit()
+                result = tres_var.getvalue()
+                return result
+    except oracledb.Error as e:
+        return f"数据库错误: {e}"
+    except Exception as e:
+        return f"异常: {e}"
+def fetch_erp_material(wo):
+    """
+    根据工单号查询 ERP 物料信息。
+    :param wo: 工单号
+    :return: (msg, columns, rows)
+             msg: 'OK' 或错误信息
+             columns: 列名列表
+             rows: 数据行列表
+    """
+    if not wo:
+        return "输入不能为空", [], []
+
+    sql = "SELECT * FROM SAJET.ERP_WO_MATERIAL WHERE WORK_ORDER = :wo"
+    try:
+        with oracledb.connect(user=username, password=password, dsn=dsn) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(sql, wo=wo)
+                rows = cursor.fetchall()
+                columns = [desc[0] for desc in cursor.description] if rows else []
+                return "OK", columns, rows
+    except oracledb.Error as e:
+        return f"数据库错误: {e}", [], []
+    except Exception as e:
+        return f"异常: {e}", [], []
+def insert_erp_material(wo_part, ecs_part, decs, kpart):
+    """
+    调用存储过程 SAJET.INSERT_WO_MATERIA 插入 ERP 物料信息。
+    :param wo_part:  工单号或料号（用于校验）
+    :param ecs_part: ECS 料号
+    :param decs:     ECS 描述
+    :param kpart:    关键件号
+    :return: 'OK' 或错误信息字符串
+    """
+    if not wo_part or not decs or not kpart:
+        return "参数不完整：工单/料号、描述、关键件号均不能为空"
+
+    try:
+        with oracledb.connect(user=username, password=password, dsn=dsn) as conn:
+            with conn.cursor() as cursor:
+                result_var = cursor.var(oracledb.DB_TYPE_VARCHAR)
+                cursor.callproc(
+                    "SAJET.INSERT_WO_MATERIA",
+                    [wo_part, ecs_part, decs, kpart, result_var]
+                )
+                conn.commit()
+                result = result_var.getvalue()
+                return result
     except oracledb.Error as e:
         return f"数据库错误: {e}"
     except Exception as e:

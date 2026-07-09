@@ -20,7 +20,6 @@ def load_config():
     else:
         save_config(DEFAULT_CONFIG)
         return DEFAULT_CONFIG.copy()
-
 def save_config(config):
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=2, ensure_ascii=False)

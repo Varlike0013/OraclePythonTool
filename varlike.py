@@ -4,18 +4,21 @@ import traceback
 import os
 import re
 import sys
+import csv
+import time
+import socket
+import threading
 import module_oracle
 import module_login
 import module_save
 import module_timer
-import csv
-import time
-import threading
+import module_thread
 
 # ---------- 全局变量（用于跨函数共享）----------
 content_frame = None         # 内容区域框架
 status_label = None          # 底部状态栏 Label
 user_label = None            # 最底部用户信息栏
+menubar = None               # 顶部菜单栏
 current_tree = None          # 当前表格树
 current_columns = None       # 当前表格表头
 #流程相关
@@ -26,6 +29,38 @@ current_rework_route = None
 server_ip = None
 
 # ---------- 资源载入 ---------
+def get_all_ips():
+    """
+    获取本机所有 IPv4 地址（排除 127.0.0.1 和链路本地地址）。
+    若无法获取，返回 ['0.0.0.0']。
+    """
+    ips = set()
+    try:
+        hostname = socket.gethostname()
+        addrs = socket.getaddrinfo(hostname, None)
+        for addr in addrs:
+            ip = addr[4][0]
+            # 过滤掉 IPv6 和本地回环
+            if ':' in ip:  # IPv6 跳过
+                continue
+            if ip and ip != '127.0.0.1' and not ip.startswith('169.254'):  # 排除链路本地
+                ips.add(ip)
+    except:
+        pass
+    # 如果上述方法未获取到有效IP，尝试连接外部地址获取主IP
+    if not ips:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("8.8.8.8", 80))
+                primary = s.getsockname()[0]
+                if primary and primary != '127.0.0.1':
+                    ips.add(primary)
+        except:
+            pass
+
+    return list(ips) if ips else ['0.0.0.0']
+def get_ips_string():
+    return ';'.join(get_all_ips())
 def resource_path(relative_path):
     """获取打包后资源的绝对路径"""
     try:
@@ -44,6 +79,60 @@ def clean_sn_input(sn_input):
     """分割输入，并去除每个部分的引号"""
     parts = re.split(r'[,\s]+', sn_input)
     return [p.strip().strip("'\"") for p in parts if p.strip()]
+def is_valid_user(user):
+    """判断是否符合D000000的格式，符合True"""
+    return re.match(r'^D\d{6}$', user) is not None
+def build_menu():
+        """根据登录状态构建菜单栏"""
+        # 清空现有菜单
+        global menubar
+        menubar.delete(0, tk.END)
+
+        if module_login.is_logined():
+            # 问题处理
+            question_menu = tk.Menu(menubar, tearoff=0)
+            menubar.add_cascade(label="问题处理", menu=question_menu)
+            question_menu.add_command(label="查询问题", command=query_issue)
+            question_menu.add_command(label="查询设置", command=query_setting)
+            # 用户（注销）
+            menubar.add_command(label="注销", command=user_logout)
+            # 重工流程
+            route_menu = tk.Menu(menubar, tearoff=0)
+            menubar.add_cascade(label="重工流程", menu=route_menu)
+            route_menu.add_command(label="---查询---", state="disabled")
+            route_menu.add_command(label="DIP$PACK", command=ui_routeR_dip_pack)
+            route_menu.add_command(label="SN", command=ui_route_sn)
+            route_menu.add_command(label="Process", command=ui_find_route_by_process)
+            route_menu.add_command(label="---添加---", state="disabled")
+            route_menu.add_command(label="DIP$PACK", command=ui_insert_routeR)
+            route_menu.add_command(label="SN", command=ui_insert_route_sn)
+            route_menu.add_command(label="复制流程", command=ui_copy_route)
+            # 清除卡号
+            menubar.add_command(label="清除卡号", command=ui_clear_mac)
+            # 服务器IP
+            server_menu = tk.Menu(menubar, tearoff=0)
+            menubar.add_cascade(label="服务器IP", menu=server_menu)
+            server_menu.add_command(label="查看IP列表", command=ui_tree_server)
+            server_menu.add_command(label="加载全部IP(用于导出或者查询)", command=reload_server_ip)
+            server_menu.add_command(label="导出全部IP", command=export_server_ip)
+            # 查询
+            query_menu = tk.Menu(menubar, tearoff=0)
+            menubar.add_cascade(label="查询", menu=query_menu)
+            query_menu.add_command(label="查询SN&PCB", command=query_sn_ppid)
+            query_menu.add_command(label="查询SN&KEYPARTS", command=query_sn_keyparts)
+            query_menu.add_command(label="查询箱号下的料件", command=qurey_keyparts_carton)
+            query_menu.add_command(label="查询重工号下的料件", command=qurey_keyparts_rework)
+            query_menu.add_command(label="查询工单状态", command=qurey_work_order)
+            query_menu.add_command(label="查询SMT料盘", command=query_smt_reelup)
+            query_menu.add_command(label="查询Lenovo箱号", command=query_lenovo_carton)
+            query_menu.add_command(label="查询工单或料号料件(风扇或者散热片)", command=query_erp_material)
+            # 其他
+            other_menu = tk.Menu(menubar, tearoff=0)
+            menubar.add_cascade(label="其他", menu=other_menu)
+            other_menu.add_command(label="更新ASUS列印", command=update_erp_asus)
+            other_menu.add_command(label="添加风扇或散热片料件", command=insert_wo_material)
+        else:
+            menubar.add_command(label="登录", command=re_login)
 # ---------- 通用输入ui --------
 def update_status_safe(text):
     """线程安全地更新状态栏"""
@@ -386,6 +475,87 @@ def show_notification(message):
     btn_close.pack(side=tk.RIGHT, padx=5, pady=5, anchor="n")
     win.after(8000, win.destroy)  # 8秒后自动关闭
     win.bind("<Button-1>", lambda e: win.destroy())
+def ui_user_action(user_action, target=None, status=None, ip_address=get_ips_string()):
+    """
+    记录用户操作日志（UI层调用），自动检查登录状态并处理错误。
+    :param user_action: 操作类型
+    :param target:      操作目标（可选）
+    :param status:      执行结果（可选）
+    :param ip_address:  客户端IP（可选）
+    """
+    if not module_login.is_logined():
+        messagebox.showwarning("未登录", "请先登录再执行此操作")
+        status_label.config(text="操作取消：用户未登录")
+        return
+    msg = module_oracle.insert_user_action(module_login.current_user, user_action, target, status, ip_address)
+    if msg != "OK":
+        messagebox.showerror("日志记录失败", f"操作日志记录失败：{msg}")
+        status_label.config(text="日志记录失败")
+def _ui_input_three_with_combo(title, confirm_callback,
+                               label1="输入1:", label2="输入2:", label3="输入3:",
+                               combo_label="选择:", combo_options=None,
+                               btn_text="确定", warning_msg="请完整输入"):
+    """
+    通用三输入框 + 下拉选择框界面
+    :param title:              标题文本
+    :param confirm_callback:   点击确定时的回调函数，接收 (value1, value2, value3, combo_selection)
+    :param label1:             第一个输入框标签
+    :param label2:             第二个输入框标签
+    :param label3:             第三个输入框标签
+    :param combo_label:        下拉框标签
+    :param combo_options:      下拉选项列表，如 ['选项1', '选项2']
+    :param btn_text:           确定按钮文字
+    :param warning_msg:        输入为空时的警告提示
+    """
+    global content_frame
+    # 清空内容区域
+    for widget in content_frame.winfo_children():
+        widget.destroy()
+
+    center_frame = tk.Frame(content_frame)
+    center_frame.pack(expand=True)
+
+    # 标题
+    tk.Label(center_frame, text=title, font=("Arial", 12, "bold")).grid(row=0, column=0, columnspan=2, pady=10)
+
+    # 输入框1
+    tk.Label(center_frame, text=label1).grid(row=1, column=0, padx=5, pady=5, sticky="e")
+    entry1 = tk.Entry(center_frame)
+    entry1.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+
+    # 输入框2
+    tk.Label(center_frame, text=label2).grid(row=2, column=0, padx=5, pady=5, sticky="e")
+    entry2 = tk.Entry(center_frame)
+    entry2.grid(row=2, column=1, padx=5, pady=5, sticky="w")
+
+    # 输入框3
+    tk.Label(center_frame, text=label3).grid(row=3, column=0, padx=5, pady=5, sticky="e")
+    entry3 = tk.Entry(center_frame)
+    entry3.grid(row=3, column=1, padx=5, pady=5, sticky="w")
+
+    # 下拉选择框
+    tk.Label(center_frame, text=combo_label).grid(row=4, column=0, padx=5, pady=5, sticky="e")
+    combo_var = tk.StringVar()
+    if combo_options:
+        combo_var.set(combo_options[0])  # 默认选择第一个
+        combo = ttk.Combobox(center_frame, textvariable=combo_var, values=combo_options, state="readonly")
+    else:
+        combo = ttk.Combobox(center_frame, textvariable=combo_var, values=[], state="readonly")
+    combo.grid(row=4, column=1, padx=5, pady=5, sticky="w")
+
+    def on_confirm():
+        val1 = entry1.get().strip()
+        val2 = entry2.get().strip()
+        val3 = entry3.get().strip()
+        sel = combo_var.get()
+        # 简单校验：若所有输入框为空，给出警告（可选择仅检查必要项，这里按需）
+        if not val1 and not val2 and not val3:
+            messagebox.showwarning("提示", warning_msg)
+            return
+        confirm_callback(val1, val2, val3, sel)
+
+    btn = tk.Button(center_frame, text=btn_text, command=on_confirm)
+    btn.grid(row=5, column=0, columnspan=2, pady=10)
 # ---------- 问题处理功能  ----------
 def query_issue(notify=False):
     """
@@ -435,11 +605,9 @@ def query_issue(notify=False):
         if col_name in FORMAT_COPY_COLUMNS:
             menu.add_command(label=f"格式复制 {format_copy_match(cell_value)}", command=lambda:copy_to_clipboard(format_copy_match(cell_value)))
             menu.add_command(label="格式查询", command=lambda:query_match(cell_value))
-        # 登录后功能
-        if module_login.is_logined():
-            menu.add_separator()
-            menu.add_command(label="回复OK", command=lambda idx=first_col_value: review_question(idx, module_login.current_user,"OK"))
-            menu.add_command(label="回复", command=lambda idx=first_col_value: review_question(idx, module_login.current_user))
+        menu.add_separator()
+        menu.add_command(label="回复OK", command=lambda idx=first_col_value: review_question(idx, module_login.current_user,"OK"))
+        menu.add_command(label="回复", command=lambda idx=first_col_value: review_question(idx, module_login.current_user))
     ui_table_tree(columns, rows, menu_builder=custom_menu)
 def query_match(str_value):
     # 检测是否同时包含 SN 和 BGA 模式
@@ -570,12 +738,13 @@ def review_question(record_id,user,reply=None):
             return
     if not messagebox.askyesno("确认", f"确定要将记录 [{record_id}] 标记为 [{reply}]  吗？"):
         return
-    success, msg = module_oracle.update_question_status(record_id, reply, user)
-    if success:
+    msg = module_oracle.update_question_status(record_id, reply, user)
+    if msg == "OK":
         messagebox.showinfo("成功", msg)
         query_issue()  # 刷新
     else:
         messagebox.showerror("错误", f"更新失败: {msg}")
+    ui_user_action("review_question",target=f"用户{user}回复问题{record_id}为{reply}",status=msg)
 def query_setting():
     global content_frame, status_label
 
@@ -589,7 +758,7 @@ def query_setting():
     config = module_save.load_config()
     misc_cfg = config['settings'].get('misc', {})
     enabled = misc_cfg.get('auto_refresh_enabled', False)
-    interval = misc_cfg.get('auto_refresh_interval', 0)
+    interval = misc_cfg.get('auto_refresh_interval', 300)
     is_show = misc_cfg.get('show_confirmation_dialog', False)
     floor_B2 = misc_cfg.get('floor_B2', True)   # 默认选中
     floor_B3 = misc_cfg.get('floor_B3', True)
@@ -766,6 +935,8 @@ class LoginDialog:
             self.result = True
             self.user_info = info
             self.dialog.destroy()
+            build_menu()
+            ui_user_action("LoginDialog:check_login",target=f"用户{emp}登陆系统",status=info)
         else:
             messagebox.showerror("错误", f"登录失败：{info}", parent=self.dialog)
             self.entry_password.delete(0, tk.END)
@@ -788,9 +959,12 @@ def re_login():
         welcome_label.pack(pady=20)
     else:
         pass
-def update_ui_after_logout():
+def user_logout():
     """注销后更新界面（可选）"""
     global user_label, content_frame
+    ui_user_action("user_logout",target=f"用户{module_login.current_user}退出系统",status="OK")
+    module_login.logout()
+    build_menu()
     user_label.config(text="当前用户: 未登录")
     for widget in content_frame.winfo_children():
         widget.destroy()
@@ -1044,7 +1218,7 @@ def ui_routeR_sn(columns, rows):
             if rows:
                 current_dip_route = dip
                 current_pack_route = pack
-                ui_routeR_dip_pack_tree(columns, rows)
+                ui_table_tree(columns, rows)
             else:
                 messagebox.showinfo("查询结果", "没有查询到数据")
         else:
@@ -1072,6 +1246,7 @@ def ui_insert_routeR():
                 messagebox.showerror("查询失败", result_msg)
         else:
             messagebox.showerror("查询失败", result_msg)
+        ui_user_action("ui_insert_routeR",target=f"用户{module_login.current_user}添加新流程{router}；DIP流程为{dip}；PACK流程为{pack}；",status=result_msg)
     _ui_input_three("添加DIP&PACK的重工流程", add_callback,"DIP流程:","PACK流程:","重工流程:")
 def ui_insert_route_sn():
     """添加新流程时，先让用户选择两个流程作为组合。"""
@@ -1086,9 +1261,9 @@ def ui_insert_route_sn():
                 contrast_route(dip,pack,router_name)
             else:
                 messagebox.showerror("失败", msg)
+            ui_user_action("ui_insert_routeR",target=f"用户{emp}添加新流程{router_name}；DIP流程为{dip}；PACK流程为{pack}；",status=msg)
         # 使用单输入获取新路由名称
-        _ui_input_one("输入新路由名称", on_router_entered, label="路由名称:", btn_text="添加")
-        
+        _ui_input_one("输入新流程名称", on_router_entered, label="流程名称:", btn_text="添加")
     def on_sn_entered(sn):
         if not sn:
             messagebox.showwarning("提示", "请输入 SN")
@@ -1115,6 +1290,7 @@ def ui_copy_route():
             messagebox.showinfo("执行结果", f"复制{route1}到{route2}成功")
         else:
             messagebox.showerror("复制失败", result_msg)
+        ui_user_action("ui_copy_route",target=f"用户{module_login.current_user}复制旧流程{route1}到{route2}；",status=result_msg)
     _ui_input_two(title="复制流程到新流程",confirm_callback=on_route_entered,label_1="现有流程:",label_2="新流程：",btn_text="确定",warning_msg="请输入 流程名 后再尝试添加")
 def ui_find_route_by_process():
     """
@@ -1284,9 +1460,10 @@ def ui_clear_mac():
             messagebox.showinfo("成功", msg)
         else:
             messagebox.showerror("失败", msg)
+        ui_user_action("delete_mac_action",target=f"删MAC卡号SN:{sn},MAC:{mac}；",status=msg)
     _ui_input_one(title="查询卡号 : ",confirm_callback=on_sn_entered,label="SN:",btn_text="确定",warning_msg="请输入 SN 后再查询")
 # -------- 服务器IP ----------
-def load_server_ip(progress_callback=None):
+def load_server_ip():
     global server_ip
     server_ip = {}
 
@@ -1338,39 +1515,41 @@ def load_server_ip(progress_callback=None):
             total_ip_count += 1
 
         # 每秒最多更新一次进度
-        if progress_callback is not None:
-            now = time.time()
-            if now - last_update_time >= 1.0:
-                progress_callback(total_ip_count)
-                last_update_time = now
-
-    # 最后再更新一次，确保最终数量显示
-    if progress_callback is not None:
-        progress_callback(total_ip_count)
+        now = time.time()
+        if now - last_update_time >= 1.0:
+            update_status_safe(f"正在加载 IP 数据... 已加载 {total_ip_count} 个 IP")
+            last_update_time = now
 
     update_status_safe(f"IP 数据加载完成，共 {total_ip_count} 个 IP")
-def exprot_server_ip():
+def reload_server_ip():
     """
     后台加载全部 IP 数据，实时显示进度，加载完成后自动导出 CSV。
+    使用模块级线程管理，防止重复执行。
     """
-    global server_ip
-
+    task_id = "load_server_ip"
+    if module_thread.is_running(task_id):
+        messagebox.showinfo("提示", "导出任务正在执行中，请勿重复启动")
+        return
+    if server_ip:
+        if not messagebox.askyesno("确认", "已存在IP数据，是否重新加载最新数据？"):
+            status_label.config(text="已取消重新加载")
+            return
     status_label.config(text="正在加载 IP 数据...")
-    root.update_idletasks()
-
-    def load_and_export():
-        # 加载数据（带进度回调）
-        def update_progress(count):
-            root.after(0, lambda: status_label.config(text=f"正在加载 IP 数据... 已加载 {count} 个 IP"))
-
-        load_server_ip(progress_callback=update_progress)
-
-        # 加载完成后，回到主线程执行导出
-        root.after(0, _do_export)
-
-    threading.Thread(target=load_and_export, daemon=True).start()
-def _do_export():
+    def on_finished(result, error):
+        if error:
+            messagebox.showerror("错误", f"加载IP失败: {error}")
+        else:
+            messagebox.showinfo("成功", f"IP数据加载完成")
+    module_thread.start_task(
+        task_id=task_id,
+        target=load_server_ip,
+        callback=on_finished
+    )
+def export_server_ip():
     """实际执行导出的函数（在主线程中运行）"""
+    if not server_ip:
+        messagebox.showinfo("提示", "未加载数据，请先加载IP数据")
+        return
     try:
         desktop = os.path.expanduser("~/Desktop")
         filepath = os.path.join(desktop, "server_ip_export.csv")
@@ -1397,9 +1576,11 @@ def _do_export():
                         writer.writerow([subnet, ip, gateway_key, status])
 
         status_label.config(text="导出完成")
+        ui_user_action("export_server_ip",target=None,status= f"数据已导出到：{filepath}")
         messagebox.showinfo("导出成功", f"数据已导出到：{filepath}")
     except Exception as e:
         status_label.config(text="导出失败")
+        ui_user_action("export_server_ip",target=None,status=f"写入CSV文件失败：{e}")
         messagebox.showerror("导出失败", f"写入CSV文件失败：{e}")
 def ui_tree_server():
     """
@@ -1527,6 +1708,7 @@ def query_sn_ppid():
             query_callback(sn, ppid)
         else:
             messagebox.showerror("错误", f"删除失败: {msg}")
+        ui_user_action("delete_sn_ppid",target=f"删除SN PPID,SN:{sn},PCB_QRCODE:{ppid}；",status=msg)
     def prompt_update_sn(sn, ppid, field):
         """弹出输入框获取新值并执行更新"""
         if field == 'sn':
@@ -1545,6 +1727,7 @@ def query_sn_ppid():
                 query_callback(new_val,ppid)
             else:
                 messagebox.showerror("错误", f"更新失败: {msg}")
+            ui_user_action("prompt_update_sn",target=f"更新SN PPID,SN:{sn},PCB_QRCODE:{ppid}，新SN:{new_val}；",status=msg)
         else:  # ppid
             new_val = simpledialog.askstring("修改 PCB_QRCODE", "请输入新的 PCB_QRCODE:", parent=root)
             if new_val is None:
@@ -1561,6 +1744,7 @@ def query_sn_ppid():
                 query_callback(sn,new_val)
             else:
                 messagebox.showerror("错误", f"更新失败: {msg}")
+            ui_user_action("prompt_update_sn",target=f"更新SN PPID,SN:{sn},PCB_QRCODE:{ppid}，新PCB:{new_val}；",status=msg)
     _ui_input_two("查询 SN & PCB",query_callback,"SN :","PCB :")
 def query_sn_keyparts():
     def query_callback(sn):
@@ -1595,6 +1779,7 @@ def query_sn_keyparts():
             query_callback(sn)
         else:
             messagebox.showerror("错误", f"删除失败: {msg}")
+        ui_user_action("delete_sn_keypart",target=f"删除SN KEYPART料件,SN:{sn},KEYPART:{part}；",status=msg)
     def delete_all_keyarts(sn):
         if not messagebox.askyesno("确认删除", f"确定要删除 SN={sn} 的所有记录吗？"):
             return
@@ -1608,6 +1793,7 @@ def query_sn_keyparts():
             query_callback(sn)
         else:
             messagebox.showerror("错误", f"删除失败: {msg}")
+        ui_user_action("delete_all_keyarts",target=f"删除SN全部料件,SN:{sn}；",status=msg)
     _ui_input_one("查询 SN & KEYPARTS",query_callback,"SN :")
 def qurey_keyparts_carton():
     list_sn = []
@@ -1649,6 +1835,7 @@ def qurey_keyparts_carton():
             query_callback(cartonc)
         else:
             messagebox.showerror("错误", f"删除失败: {msg}")
+        ui_user_action("delete_keyparts_wo_process",target=f"查询条件箱号：{cartonc},删除{wo}工单下{process}站位的料件记录；",status=msg)
     _ui_input_one("查询 箱号下SN的料件 ",query_callback,"箱号 :")
 def qurey_keyparts_rework():
     list_sn = []
@@ -1713,6 +1900,7 @@ def qurey_keyparts_rework():
             query_callback(rework)
         else:
             messagebox.showerror("错误", f"删除失败: {msg}")
+        ui_user_action("delete_keyparts_wo_process",target=f"查询条件重工号：{rework},删除{wo}工单下{process}站位的料件记录；",status=msg)
     _ui_input_one("查询 重工编号下的SN的料件 ",query_callback,"重工编号 :")
 def qurey_work_order():
     def query_callback(work):
@@ -1756,10 +1944,158 @@ def qurey_work_order():
             query_callback(wo)
         else:
             messagebox.showerror("错误", f"修改失败: {msg}")
+        ui_user_action("update_workorder_status",target=f"修改工单状态：修改工单{wo}的状态为{status}；",status=msg)
     _ui_input_one("查询工单状态 ",query_callback,"工单 :")
+def query_smt_reelup():
+    def query_callback(line,site,sn):
+        result_msg, columns, rows = module_oracle.fetch_smt_reelup(line,site,sn)
+        if result_msg == 'OK':
+            if rows:
+                ui_table_tree(columns, rows,reel_menu)
+            else:
+                messagebox.showinfo("查询结果", "没有查询到数据")
+        else:
+            messagebox.showerror("查询失败", result_msg)
+    def reel_menu(menu, tree, columns, row_id, col_index, col_name, values, cell_value, first_col_value):
+        index = values[columns.index('NUMINDEX')] if 'NUMINDEX' in columns else None
+        user = values[columns.index('STRLOADUSER')] if 'STRLOADUSER' in columns else None  
+        reelsn = values[columns.index('STRREELUPSN')] if 'STRREELUPSN' in columns else None  
+
+        menu.add_command(label=f"复制 {col_name}", command=lambda: copy_to_clipboard(cell_value))
+        if module_login.is_logined():
+            menu.add_separator()
+            if is_valid_user(user):
+                menu.add_command(label=f"删除工号为{user}的料号为{reelsn}的记录",state="disabled")
+            else:
+                menu.add_command(label=f"删除工号为{user}的料号为{reelsn}的记录",command=lambda: delete_smt_reelup(index,reelsn))
+    def delete_smt_reelup(index,reelsn):
+        if not messagebox.askyesno("确认删除", f"确定要删除索引为{index}的记录吗？"):
+            return
+        msg = module_oracle.delete_smt_reelup(index,reelsn)
+        if msg == "OK":
+            messagebox.showinfo("成功", "删除成功")
+            query_smt_reelup()
+        else:
+            messagebox.showerror("错误", f"删除失败: {msg}")
+        ui_user_action("delete_smt_reelup",target=f"删除索引为{index},料盘为{reelsn}的记录吗；",status=msg)
+    _ui_input_three("查询SMT上料",query_callback," 线别 : "," 站位 : "," 料盘SN : ")
+    update_status_safe("线别类似:B33F01LB&B303F01L,站位:1-100,输入线别和站位,或者单独输入料盘SN")
+def query_lenovo_carton():
+    def query_callback(carton):
+        result_msg, columns, rows = module_oracle.fetch_lenovo_carton(carton)
+        if result_msg == 'OK':
+            if rows:
+                ui_table_tree(columns, rows,carton_menu)
+            else:
+                messagebox.showinfo("查询结果", "没有查询到数据")
+        else:
+            messagebox.showerror("查询失败", result_msg)
+    def carton_menu(menu, tree, columns, row_id, col_index, col_name, values, cell_value, first_col_value):
+        carton_no = values[columns.index('CARTON_NO')] if 'CARTON_NO' in columns else None
+        menu.add_command(label=f"复制 {col_name}", command=lambda: copy_to_clipboard(cell_value))
+        menu.add_command(label=f"查看箱号{carton_no}内的板",command=lambda: query_lenovo_carton_sn(carton_no))
+        menu.add_command(label=f"清空箱号{carton_no}内的板",command=lambda: clear_lenovo_carton_sn(carton_no))
+        if module_login.is_logined():
+            menu.add_separator()
+             # 创建状态子菜单
+            status_menu = tk.Menu(menu, tearoff=0)
+            menu.add_cascade(label="修改箱号状态", menu=status_menu)
+            status_map = {
+                "Y": "Close",
+                "U": "UnHold",
+                "N": "UnClose",
+            }
+            for status_code, status_desc in status_map.items():
+                status_menu.add_command(
+                    label=f"{status_code} - {status_desc}",
+                    command=lambda s=status_code: update_lenovo_status(carton_no, s)
+                )
+    def query_lenovo_carton_sn(carton):
+        result_msg, columns, rows = module_oracle.fetch_lenovo_carton_sn(carton)
+        if result_msg == 'OK':
+            if rows:
+                ui_table_tree(columns, rows)
+            else:
+                messagebox.showinfo("查询结果", "没有查询到数据")
+        else:
+            messagebox.showerror("查询失败", result_msg)
+    def update_lenovo_status(carton_no,status):
+        if not messagebox.askyesno("确认修改", f"确定要修改箱号{carton_no}的状态为{status}吗？"):
+            return
+        msg = module_oracle.update_lenovo_status(carton_no,status)
+        if msg == 'OK':
+            query_callback(carton_no)
+        else:
+            messagebox.showerror("查询失败", msg)
+        ui_user_action("update_lenovo_status",target=f"修改箱号{carton_no}的状态为{status}；",status=msg)
+    def clear_lenovo_carton_sn(carton):
+        if not messagebox.askyesno("确认删除", f"确定要清空箱号{carton}内的板吗？"):
+            return
+        msg = module_oracle.delete_lenovo_carton_sn(carton)
+        if msg == 'OK':
+            query_callback(carton)
+        else:
+            messagebox.showerror("查询失败", msg)
+        ui_user_action("clear_lenovo_carton_sn",target=f"清空箱号{carton}内的板；",status=msg)
+    _ui_input_one("查询联想箱号",query_callback,"输入箱号：")
+def query_erp_material():
+    def query_callback(carton):
+        result_msg, columns, rows = module_oracle.fetch_erp_material(carton)
+        if result_msg == 'OK':
+            if rows:
+                ui_table_tree(columns, rows)
+            else:
+                messagebox.showinfo("查询结果", "没有查询到数据")
+        else:
+            messagebox.showerror("查询失败", result_msg)
+    _ui_input_one("查询风扇或散热片料件",query_callback,"输入料号或者工单：")
+# ---------- 其他 ------------
+def update_erp_asus():
+    """
+    启动 ERP 更新任务（后台线程），利用 module_thread 防止重复执行。
+    """
+    task_id = "update_erp_asus"
+    if module_thread.is_running(task_id):
+        messagebox.showinfo("提示", "ERP更新任务正在执行中，请勿重复启动")
+        return
+    status_label.config(text="正在更新 ERP 数据，请稍候...")
+    def on_finished(result, error):
+        if error:
+            messagebox.showerror("错误", f"同步失败: {error}")
+            status_label.config(text="同步失败")
+        elif result == "OK":
+            messagebox.showinfo("成功", "ERP 数据同步完成")
+            status_label.config(text="同步完成")
+        else:
+            messagebox.showerror("错误", f"同步失败: {result}")
+            status_label.config(text="同步失败")
+        ui_user_action(task_id,target=None,status=result)
+    module_thread.start_task(
+        task_id=task_id,
+        target=module_oracle.update_erp_asus,
+        callback=on_finished
+    )
+def insert_wo_material():
+    def insert_callback(wopart, ecs_part, kpart, decs):
+        msg = module_oracle.insert_erp_material(wopart,ecs_part,decs,kpart)
+        if msg == 'OK':
+            messagebox.showinfo("查询结果", "添加成功")
+        else:
+            messagebox.showerror("查询失败", msg)
+        ui_user_action("insert_wo_material",target=f"工单或者料号：{wopart}；ECS料号：{ecs_part}；料件料号：{kpart}；料件类型：{decs}；",status=msg)
+    _ui_input_three_with_combo(
+        title="添加风扇或散热片料件",
+        label1="工单号或者料号：",
+        label2="ECS料号:",
+        label3="风扇或散热料号：",
+        combo_label="状态",
+        combo_options=["FAN SET", "HEAT PIPE", "PLATE"],
+        confirm_callback=insert_callback,
+        warning_msg="请至少输入一个条件"
+    )
 # ---------- 主函数 -----------
 def main():
-    global root, content_frame, status_label, user_label
+    global root, content_frame, status_label, user_label,menubar
 
     root = tk.Tk()
     root.title("VarlikeTools")
@@ -1767,6 +2103,7 @@ def main():
     icon_path = resource_path("favicon.ico")
     root.iconbitmap(icon_path)
     
+    module_thread.init(root)
     # 加载窗口配置
     config = module_save.load_config()
     win_cfg = config['settings']['window']
@@ -1783,46 +2120,10 @@ def main():
     else:
         initial_welcome = "欢迎使用 VarlikeTools\n请点击菜单栏「用户->登录」"
         user_display = "未登录"
-
     # 菜单栏
     menubar = tk.Menu(root)
     root.config(menu=menubar)
-    # 查询
-    question_menu = tk.Menu(menubar, tearoff=0)
-    menubar.add_cascade(label="问题处理", menu=question_menu)
-    question_menu.add_command(label="查询问题", command=query_issue)
-    question_menu.add_command(label="查询设置", command=query_setting)
-    # 用户
-    menu_user = tk.Menu(menubar, tearoff=0)
-    menubar.add_cascade(label="用户", menu=menu_user)
-    menu_user.add_command(label="登录", command=re_login)
-    menu_user.add_command(label="注销", command=lambda: (module_login.logout(), update_ui_after_logout()))
-    # 重工流程
-    route_menu = tk.Menu(menubar, tearoff=0)
-    menubar.add_cascade(label="重工流程", menu=route_menu)
-    route_menu.add_command(label="---查询---", state="disabled")
-    route_menu.add_command(label="DIP$PACK", command=ui_routeR_dip_pack)
-    route_menu.add_command(label="SN", command=ui_route_sn)
-    route_menu.add_command(label="Process",command=ui_find_route_by_process)
-    route_menu.add_command(label="---添加---", state="disabled")
-    route_menu.add_command(label="DIP$PACK", command=ui_insert_routeR)
-    route_menu.add_command(label="SN", command=ui_insert_route_sn)
-    route_menu.add_command(label="复制流程", command=ui_copy_route)
-    #清除卡号
-    menubar.add_command(label="清除卡号", command=ui_clear_mac)
-    #服务器IP
-    server_menu = tk.Menu(menubar, tearoff=0)
-    menubar.add_cascade(label="服务器IP", menu=server_menu)
-    server_menu.add_command(label="查看IP列表", command=ui_tree_server)
-    server_menu.add_command(label="导出全部IP", command=exprot_server_ip)
-    #查询
-    query_menu = tk.Menu(menubar, tearoff=0)
-    menubar.add_cascade(label="查询", menu=query_menu)
-    query_menu.add_command(label="查询SN&PCB", command=query_sn_ppid)
-    query_menu.add_command(label="查询SN&KEYPARTS", command=query_sn_keyparts)
-    query_menu.add_command(label="查询箱号下的料件", command=qurey_keyparts_carton)
-    query_menu.add_command(label="查询重工号下的料件", command=qurey_keyparts_rework)
-    query_menu.add_command(label="查询工单状态", command=qurey_work_order)
+    build_menu()
     # 内容区域
     content_frame = tk.Frame(root)
     content_frame.pack(fill=tk.BOTH, expand=True)
@@ -1835,19 +2136,24 @@ def main():
     status_label.pack(side=tk.TOP, fill=tk.X)
     user_label = tk.Label(bottom_frame, text=f"当前用户: {user_display}", bd=1, relief=tk.SUNKEN, anchor=tk.W)
     user_label.pack(side=tk.TOP, fill=tk.X)
-    # 初始化定时器，传入 root 和刷新函数（query_issue）
-    module_timer.init_timer(root, lambda: query_issue(notify=True))
     # 加载配置
     config = module_save.load_config()
     refresh_interval = config['settings']['misc'].get('auto_refresh_interval', 0)
     auto_refresh_enabled = config['settings']['misc'].get('auto_refresh_enabled', False)
-    # 如果启用，启动定时器
-    if auto_refresh_enabled and refresh_interval > 0:
-        module_timer.set_interval(refresh_interval)
-        module_timer.start()
+    if module_login.is_logined():
+        # 初始化定时器，传入 root 和刷新函数（query_issue）
+        module_timer.init_timer(root, lambda: query_issue(notify=True))
+        # 如果启用，启动定时器
+        if auto_refresh_enabled and refresh_interval > 0:
+            module_timer.set_interval(refresh_interval)
+            module_timer.start()
+        else:
+            # 确保停止
+            module_timer.stop()
     else:
-        # 确保停止
-        module_timer.stop()
+        config = module_save.load_config()
+        config['settings']['misc']['auto_refresh_enabled'] = False
+        module_save.save_config(config)
     # 窗口关闭保存配置
     def on_closing():
         module_timer.stop()
