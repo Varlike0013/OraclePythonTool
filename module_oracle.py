@@ -1362,7 +1362,6 @@ def insert_user_action(user_no, user_action, target=None, status=None, ip_addres
     """
     if not user_no or not user_action:
         return "工号和操作类型不能为空"
-
     try:
         with oracledb.connect(user=username, password=password, dsn=dsn) as conn:
             with conn.cursor() as cursor:
