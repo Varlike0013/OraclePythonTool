@@ -1,6 +1,7 @@
 import os
 import oracledb
 import sys
+import datetime
 import module_save
 
 # 获取程序运行时的根目录
@@ -233,6 +234,35 @@ def fetch_route_steps(route_name):
         return [], []
     except Exception as e:
         return [], []
+def fetch_route_steps_necessary(route_name):
+    """
+    根据流程名称获取该流程的必过步骤（进程名）
+    :param route_name:
+    :return: (columns, rows) 成功；如果失败或没数据，返回 (None, None) 或 ([], [])
+    """
+    try:
+        with oracledb.connect(user=username, password=password, dsn=dsn) as conn:
+            with conn.cursor() as cursor:
+                # SQL：根据流程名称查询步骤，显示进程名称和是否必选，按步骤顺序排序
+                sql = """
+                    SELECT U.PROCESS_NAME
+                    FROM SAJET.SYS_ROUTE_DETAIL D
+                    INNER JOIN SAJET.SYS_ROUTE R
+                        ON D.ROUTE_ID = R.ROUTE_ID
+                    INNER JOIN SAJET.SYS_PROCESS U
+                        ON D.NEXT_PROCESS_ID = U.PROCESS_ID
+                    WHERE R.ROUTE_NAME = :route_name AND SEQ = STEP
+                    AND D.NECESSARY = 'Y'
+                    ORDER BY D.SEQ ASC
+                """
+                cursor.execute(sql, route_name=route_name)
+                rows = cursor.fetchall()
+                columns = ["PROCESS_NAME"]   # 显示列名
+                return columns, rows
+    except oracledb.Error as e:
+        return [], []
+    except Exception as e:
+        return [], []
 def check_route_exi(route_name):
     """
     根据流程名称获取该流程的所有步骤（进程名、是否必选）
@@ -303,7 +333,7 @@ def fetch_sn_mac(sn):
         LEFT JOIN SAJET.G_SN_STATUS S ON S.SERIAL_NUMBER = M.SERIAL_NUMBER
         LEFT JOIN SAJET.SYS_PROCESS P ON P.PROCESS_ID = S.PROCESS_ID
         LEFT JOIN SAJET.SYS_PROCESS R ON R.PROCESS_ID = S.WIP_PROCESS
-        WHERE M.SERIAL_NUMBER IN (:sn)
+        WHERE M.SERIAL_NUMBER = :sn
     """
     try:
         with oracledb.connect(user=username, password=password, dsn=dsn) as conn:
@@ -316,7 +346,44 @@ def fetch_sn_mac(sn):
         return f"数据库错误: {e}",[], []
     except Exception as e:
         return f"异常: {e}",[], []
-def delete_sn_mac(sn, mac):
+def fetch_rework_mac(rewk):
+    """
+    根据序列号 rewk 查询对应在F1的SN的 MAC、工单、状态、时间等信息。
+    :param rewk: 重工号
+    :return: (result,columns, rows)，result(OK/ERROR),columns 为列名列表，rows 为数据行列表。
+             若查询失败或无数据，返回 (error,[], [])。
+    """
+    if not rewk:
+        return "重工号 不能为空",[], []
+    sql = """
+        SELECT M.WORK_ORDER,
+            M.SERIAL_NUMBER,
+            M.MAC,
+            NVL(P.PROCESS_NAME, 'None') AS CURRENT_PROCESS,
+            NVL(R.PROCESS_NAME, 'None') AS WIP_PROCESS,
+            M.UPDATE_USERID,
+            M.UPDATE_TIME,
+            M.UUID,
+            M.CUSTOMER_SN
+        FROM SAJET.G_WO_MAC M
+        LEFT JOIN SAJET.G_SN_STATUS S ON S.SERIAL_NUMBER = M.SERIAL_NUMBER
+        LEFT JOIN SAJET.SYS_PROCESS P ON P.PROCESS_ID = S.PROCESS_ID
+        LEFT JOIN SAJET.SYS_PROCESS R ON R.PROCESS_ID = S.WIP_PROCESS
+        WHERE M.SERIAL_NUMBER IN (SELECT SERIAL_NUMBER FROM SAJET.G_SN_STATUS WHERE REWORK_NO = :rewk)
+        AND R.PROCESS_NAME = 'F1Test'
+    """
+    try:
+        with oracledb.connect(user=username, password=password, dsn=dsn) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(sql, rewk=rewk)
+                rows = cursor.fetchall()
+                columns = [desc[0] for desc in cursor.description] if rows else []
+                return "OK",columns, rows
+    except oracledb.Error as e:
+        return f"数据库错误: {e}",[], []
+    except Exception as e:
+        return f"异常: {e}",[], []
+def delete_sn_mac(sn,mac):
     """
     删除 SAJET.G_WO_MAC 表中指定 SN 和 MAC 的记录。
     :param sn:  序列号
@@ -327,19 +394,51 @@ def delete_sn_mac(sn, mac):
     if not sn or not mac:
         return False, "SN 和 MAC 不能为空"
     sql = """
-        DELETE FROM SAJET.G_WO_MAC
-        WHERE SERIAL_NUMBER = :sn OR MAC = :mac
+        DELETE FROM SAJET.G_WO_MAC M
+        LEFT JOIN SAJET.G_SN_STATUS S ON S.SERIAL_NUMBER = M.SERIAL_NUMBER
+        LEFT JOIN SAJET.SYS_PROCESS R ON R.PROCESS_ID = S.WIP_PROCESS
+        WHERE M.SERIAL_NUMBER = :sn OR MAC = :mac
     """
     try:
         with oracledb.connect(user=username, password=password, dsn=dsn) as conn:
             with conn.cursor() as cursor:
-                cursor.execute(sql, sn=sn, mac=mac)
+                cursor.execute(sql, sn=sn,mac=mac)
                 rowcount = cursor.rowcount  # 受影响的行数
                 conn.commit()
                 if rowcount > 0:
                     return "OK"
                 else:
                     return f"未找到匹配的记录 (SN: {sn}, MAC: {mac})"
+    except oracledb.Error as e:
+        return f"数据库错误: {e}"
+    except Exception as e:
+        return f"异常: {e}"
+def delete_mac_rework(rewk):
+    """
+    删除 SAJET.G_WO_MAC 表中指定 SN 和 MAC 的记录。
+    :param rewk: 重工号
+    :return: ( message: str)
+            message: 操作结果描述
+    """
+    if not rewk:
+        return "重工号 不能为空",[], []
+    sql = """
+        DELETE FROM SAJET.G_WO_MAC M
+        LEFT JOIN SAJET.G_SN_STATUS S ON S.SERIAL_NUMBER = M.SERIAL_NUMBER
+        LEFT JOIN SAJET.SYS_PROCESS R ON R.PROCESS_ID = S.WIP_PROCESS
+        WHERE M.SERIAL_NUMBER IN (SELECT SERIAL_NUMBER FROM SAJET.G_SN_STATUS WHERE REWORK_NO = :rewk)
+        AND R.PROCESS_NAME = 'F1Test'
+    """
+    try:
+        with oracledb.connect(user=username, password=password, dsn=dsn) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(sql, rewk=rewk)
+                rowcount = cursor.rowcount  # 受影响的行数
+                conn.commit()
+                if rowcount > 0:
+                    return "OK"
+                else:
+                    return f"未找到匹配的记录 (rewk:{rewk})"
     except oracledb.Error as e:
         return f"数据库错误: {e}"
     except Exception as e:
@@ -427,7 +526,7 @@ def copy_route_new(old_route,new_route,emp,is_overwrite=False):
     :return: (message: str)
     """
     if not old_route or not new_route or not emp:
-        return False, "参数不完整：原流程、新流程、工号均不能为空"
+        return "参数不完整：原流程、新流程、工号均不能为空"
 
     overwrite_flag = 'Y' if is_overwrite else 'N'
 
@@ -460,6 +559,34 @@ def insert_ht_mac(sn, mac):
         with oracledb.connect(user=username, password=password, dsn=dsn) as conn:
             with conn.cursor() as cursor:
                 cursor.execute(sql, sn=sn, mac=mac)
+                rowcount = cursor.rowcount
+                conn.commit()
+                if rowcount > 0:
+                    return "OK"
+                else:
+                    return "未找到匹配的记录，插入失败"
+    except oracledb.Error as e:
+        return f"数据库错误: {e}"
+    except Exception as e:
+        return f"异常: {e}"
+def insert_ht_mac_rework(rewk):
+    """
+    将 SAJET.G_WO_MAC 中指定 SN 和 MAC 的记录插入到 SAJET.G_HT_WO_MAC（历史表）中。
+    :param sn:  序列号
+    :param mac: MAC地址
+    :return: (message: str)
+    """
+    if not rewk:
+        return "SN 和 MAC 不能为空"
+    sql = """
+        INSERT INTO SAJET.G_HT_WO_MAC
+        SELECT * FROM SAJET.G_WO_MAC W
+        WHERE W.SERIAL_NUMBER IN (SELECT SERIAL_NUMBER FROM SAJET.G_SN_STATUS WHERE REWORK_NO = :rewk)
+    """
+    try:
+        with oracledb.connect(user=username, password=password, dsn=dsn) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(sql, rewk=rewk)
                 rowcount = cursor.rowcount
                 conn.commit()
                 if rowcount > 0:
@@ -1181,12 +1308,6 @@ def delete_smt_reelup(index, sn):
         return "索引不能为空"
     if not sn:
         return "SN 不能为空"
-
-    try:
-        index = int(index)
-    except (TypeError, ValueError):
-        return "索引必须为数字"
-
     try:
         with oracledb.connect(user=username, password=password, dsn=dsn) as conn:
             with conn.cursor() as cursor:
@@ -1198,8 +1319,8 @@ def delete_smt_reelup(index, sn):
                     return f"该料盘SN({sn})记录数不足，当前 {count} 条，至少需要2条才能删除"
 
                 # 2. 执行删除
-                del_sql = "DELETE FROM TBL_SMT_REELUPINFO@smt T WHERE T.NUMINDEX = :index"
-                cursor.execute(del_sql, index=index)
+                del_sql = "DELETE FROM TBL_SMT_REELUPINFO@smt T WHERE T.NUMINDEX = :numindex"
+                cursor.execute(del_sql, numindex=index)
                 rowcount = cursor.rowcount
                 conn.commit()
                 if rowcount > 0:
@@ -1428,3 +1549,130 @@ def insert_erp_material(wo_part, ecs_part, decs, kpart):
         return f"数据库错误: {e}"
     except Exception as e:
         return f"异常: {e}"
+def fetch_rework_sn(query_data,column_map):
+    """
+    根据查询数据字典查询满足条件的 SN 记录。
+    :param query_data: 字典，格式 {"工单": ["WO1", "WO2"], "序号": ["SN1"]}
+    :return: (msg, columns, rows)
+    """
+    if not query_data:
+        return "查询条件为空", [], []
+
+    # 构建条件列表
+    conditions = []
+    bind_vars = {}
+    param_idx = 0
+
+    for key, values in query_data.items():
+        if key not in column_map:
+            continue
+        if not values:
+            continue
+        # 去重并过滤空值
+        valid_vals = [v for v in values if v and v.strip()]
+        if not valid_vals:
+            continue
+        col = column_map[key]
+        placeholders = ','.join([f':p{param_idx+i}' for i in range(len(valid_vals))])
+        conditions.append(f"S.{col} IN ({placeholders})")
+        for i, val in enumerate(valid_vals):
+            bind_vars[f'p{param_idx+i}'] = val
+        param_idx += len(valid_vals)
+
+    if not conditions:
+        return "没有有效的查询条件", [], []
+
+    sql_where = " OR ".join(conditions)
+    sql = f"""
+        SELECT S.SERIAL_NUMBER,S.WORK_ORDER,P.PART_NO,L.PDLINE_NAME,P1.PROCESS_NAME,P2.PROCESS_NAME,T.TERMINAL_NAME,S.CUSTOMER_SN,S.PALLET_NO,S.CARTON_NO,S.CONTAINER,S.OUT_PDLINE_TIME,R.ROUTE_NAME
+        FROM SAJET.G_SN_STATUS S
+        LEFT JOIN SAJET.SYS_PART P ON P.PART_ID = S.MODEL_ID
+        LEFT JOIN SAJET.SYS_PDLINE L ON L.PDLINE_ID = S.PDLINE_ID
+        LEFT JOIN SAJET.SYS_PROCESS P1 ON P1.PROCESS_ID = S.WIP_PROCESS
+        LEFT JOIN SAJET.SYS_PROCESS P2 ON P2.PROCESS_ID = S.PROCESS_ID
+        LEFT JOIN SAJET.SYS_TERMINAL T ON T.TERMINAL_ID = S.TERMINAL_ID
+        LEFT JOIN SAJET.SYS_ROUTE R ON R.ROUTE_ID = S.ROUTE_ID
+        WHERE S.CURRENT_STATUS = 0 
+          AND S.WORK_FLAG = 0
+          AND ({sql_where})
+    """
+    try:
+        with oracledb.connect(user=username, password=password, dsn=dsn) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(sql, bind_vars)
+                rows = cursor.fetchall()
+                columns = [desc[0] for desc in cursor.description] if rows else []
+                return "OK", columns, rows
+    except oracledb.Error as e:
+        return f"数据库错误: {e}", [], []
+    except Exception as e:
+        return f"异常: {e}", [], []
+def check_exists_in_status(column_map,input_type, value):
+    """
+    检查 G_SN_STATUS 表中指定字段的值是否存在。
+    :param column_map: 类型到字段名的映射字典
+    :param input_type: 输入类型（如 '序号'）
+    :param value: 要检查的值
+    :return: 'OK' 或错误信息字符串
+    """
+    if input_type not in column_map:
+        return f"未知的输入类型: {input_type}"
+    field = column_map[input_type]
+    if not value:
+        return f"{field} 不能为空"
+
+    sql = f"SELECT COUNT(*) FROM SAJET.G_SN_STATUS WHERE {field} = :value"
+    try:
+        with oracledb.connect(user=username, password=password, dsn=dsn) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(sql, value=value)
+                count = cursor.fetchone()[0]
+                if count > 0:
+                    return "OK"
+                else:
+                    return f"{input_type}: {value} 不存在"
+    except oracledb.Error as e:
+        return f"数据库错误: {e}"
+    except Exception as e:
+        return f"异常: {e}"
+def get_rework_no():
+    """
+    生成一个新的重工号，格式：RW + YYYYMMDD + 5位流水号（不足补零）
+    基于最新记录（按 UPDATE_TIME 降序）的尾号 + 1 生成。
+    :return: (msg, rework_no)
+    """
+    today = datetime.datetime.now().strftime('%Y%m%d')
+    prefix = f"RW{today}"
+
+    sql = """
+        SELECT REWORK_NO FROM (
+            SELECT REWORK_NO FROM SAJET.G_REWORK_NO 
+            WHERE REWORK_NO LIKE 'RW%' 
+            ORDER BY UPDATE_TIME DESC
+        ) WHERE ROWNUM = 1
+    """
+
+    try:
+        with oracledb.connect(user=username, password=password, dsn=dsn) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(sql)
+                row = cursor.fetchone()
+                if row:
+                    last_no = row[0]
+                    tail_str = last_no[10:15]  # 索引 10~14
+                    try:
+                        tail = int(tail_str)
+                    except ValueError:
+                        tail = 0
+                else:
+                    tail = 0
+                new_tail = tail + 1
+                if new_tail > 99999:
+                    new_tail = 1
+                tail_str = f"{new_tail:05d}"
+                rework_no = f"{prefix}{tail_str}"
+                return "OK", rework_no
+    except oracledb.Error as e:
+        return f"数据库错误: {e}", None
+    except Exception as e:
+        return f"异常: {e}", None

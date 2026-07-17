@@ -1,5 +1,6 @@
-import tkinter as tk
 from tkinter import ttk, messagebox,simpledialog
+from collections import Counter
+import tkinter as tk
 import traceback
 import os
 import re
@@ -82,6 +83,64 @@ def clean_sn_input(sn_input):
 def is_valid_user(user):
     """判断是否符合D000000的格式，符合True"""
     return re.match(r'^D\d{6}$', user) is not None
+def check_route_uniqueness(cols, rows):
+    """
+    检查查询结果中的流程名称是否唯一。
+    若唯一，返回该流程名称；若存在多个不同流程，弹出错误并显示各流程名称及数量，返回 None。
+    :param cols: 列名列表
+    :param rows: 数据行列表
+    :return: str or None
+    """
+    if not rows:
+        return None
+    try:
+        route_idx = cols.index("ROUTE_NAME")
+        route_list = [row[route_idx] for row in rows]
+        route_counts = Counter(route_list)
+        if len(route_counts) == 1:
+            return route_list[0]  # 唯一的流程名称
+        else:
+            msg = "查询结果包含多个不同的流程：\n\n"
+            for route, count in route_counts.items():
+                msg += f"  {route}: {count} 条\n"
+            messagebox.showerror("流程冲突", msg)
+            return None
+    except ValueError:
+        # 若列中没有 ROUTE_NAME，忽略检查，返回 None
+        return None
+def parse_range_string(input_str):
+    """
+    解析范围字符串，如 '267G004134-267G004136'
+    返回 (prefix, start_num, end_num, width) 或引发 ValueError。
+    """
+    if '-' not in input_str:
+        raise ValueError("输入不包含 '-'，不是范围格式")
+    left, right = input_str.split('-', 1)
+    left, right = left.strip(), right.strip()
+    if not left or not right:
+        raise ValueError("范围格式错误，左右两边均不能为空")
+
+    # 寻找公共前缀
+    i = 0
+    while i < len(left) and i < len(right) and left[i] == right[i]:
+        i += 1
+    if i == 0:
+        raise ValueError("两个值没有公共前缀")
+    prefix = left[:i]
+    left_suffix = left[i:]
+    right_suffix = right[i:]
+
+    # 确保后缀是纯数字
+    if not left_suffix.isdigit() or not right_suffix.isdigit():
+        raise ValueError("后缀必须为纯数字")
+    start_num = int(left_suffix)
+    end_num = int(right_suffix)
+    if start_num > end_num:
+        raise ValueError(f"起始值({start_num})大于结束值({end_num})")
+
+    # 宽度取两边后缀长度中的较大值（保证格式一致）
+    width = max(len(left_suffix), len(right_suffix))
+    return prefix, start_num, end_num, width
 def build_menu():
         """根据登录状态构建菜单栏"""
         # 清空现有菜单
@@ -108,7 +167,10 @@ def build_menu():
             route_menu.add_command(label="SN", command=ui_insert_route_sn)
             route_menu.add_command(label="复制流程", command=ui_copy_route)
             # 清除卡号
-            menubar.add_command(label="清除卡号", command=ui_clear_mac)
+            mac_menu = tk.Menu(menubar, tearoff=0)
+            menubar.add_cascade(label="清除卡号", menu=mac_menu)
+            mac_menu.add_command(label="SN清除单板", command=ui_clear_mac)
+            mac_menu.add_command(label="重工号清除多板", command=ui_clear_mac_rework)
             # 服务器IP
             server_menu = tk.Menu(menubar, tearoff=0)
             menubar.add_cascade(label="服务器IP", menu=server_menu)
@@ -131,6 +193,8 @@ def build_menu():
             menubar.add_cascade(label="其他", menu=other_menu)
             other_menu.add_command(label="更新ASUS列印", command=update_erp_asus)
             other_menu.add_command(label="添加风扇或散热片料件", command=insert_wo_material)
+            #重工
+            menubar.add_command(label="重工执行", command=ui_rework)
         else:
             menubar.add_command(label="登录", command=re_login)
 # ---------- 通用输入ui --------
@@ -1462,6 +1526,42 @@ def ui_clear_mac():
             messagebox.showerror("失败", msg)
         ui_user_action("delete_mac_action",target=f"删MAC卡号SN:{sn},MAC:{mac}；",status=msg)
     _ui_input_one(title="查询卡号 : ",confirm_callback=on_sn_entered,label="SN:",btn_text="确定",warning_msg="请输入 SN 后再查询")
+def ui_clear_mac_rework():
+    """清除重工号下的MAC卡号"""
+    def on_input_entered(rewk):
+        if not rewk:
+            messagebox.showwarning("提示", "请输入 重工号")
+            return
+        result_msg, columns, rows = module_oracle.fetch_rework_mac(rewk)
+        if result_msg == 'OK':
+            ui_table_tree(columns, rows,menu_mac)
+        else:
+            messagebox.showerror("查询失败", result_msg)
+    def menu_mac(menu, tree, columns, row_id, col_index, col_name, values, cell_value, first_col_value):
+        """自定义 MAC 表格右键菜单"""
+        sn = values[columns.index('SERIAL_NUMBER')] if 'SERIAL_NUMBER' in columns else None
+        mac = values[columns.index('MAC')] if 'MAC' in columns else None
+
+        menu.add_command(label=f"复制 {col_name}", command=lambda: root.clipboard_append(cell_value))
+        menu.add_command(label="查看当前值", command=lambda: show_cell_value(cell_value,col_name))
+
+        menu.add_separator()
+        menu.add_command(label="删除 MAC",command=lambda s=sn, m=mac: delete_mac_action(s, m, tree))
+    def delete_mac_action(rewk):
+        """执行删除 MAC 操作"""
+        if not messagebox.askyesno("确认删除", f"确定要删除查询到的全部记录吗？"):
+            return
+        msg = module_oracle.insert_ht_mac_rework(rewk)
+        if msg!="OK":
+            messagebox.showerror("失败", msg)
+            return
+        msg = module_oracle.delete_mac_rework(rewk)
+        if msg=="OK":
+            messagebox.showinfo("成功", msg)
+        else:
+            messagebox.showerror("失败", msg)
+        ui_user_action("delete_mac_action",target=f"删MAC重工号:{rewk}；",status=msg)
+    _ui_input_one(title="查询卡号 : ",confirm_callback=on_input_entered,label="重工号:",btn_text="确定",warning_msg="请输入 重工号 后再查询")
 # -------- 服务器IP ----------
 def load_server_ip():
     global server_ip
@@ -1962,19 +2062,18 @@ def query_smt_reelup():
         reelsn = values[columns.index('STRREELUPSN')] if 'STRREELUPSN' in columns else None  
 
         menu.add_command(label=f"复制 {col_name}", command=lambda: copy_to_clipboard(cell_value))
-        if module_login.is_logined():
-            menu.add_separator()
-            if is_valid_user(user):
-                menu.add_command(label=f"删除工号为{user}的料号为{reelsn}的记录",state="disabled")
-            else:
-                menu.add_command(label=f"删除工号为{user}的料号为{reelsn}的记录",command=lambda: delete_smt_reelup(index,reelsn))
+        menu.add_separator()
+        if is_valid_user(user):
+            menu.add_command(label=f"删除工号为{user}的料号为{reelsn}的记录",state="disabled")
+        else:
+            menu.add_command(label=f"删除工号为{user}的料号为{reelsn}的记录",command=lambda: delete_smt_reelup(index,reelsn))
     def delete_smt_reelup(index,reelsn):
         if not messagebox.askyesno("确认删除", f"确定要删除索引为{index}的记录吗？"):
             return
         msg = module_oracle.delete_smt_reelup(index,reelsn)
         if msg == "OK":
             messagebox.showinfo("成功", "删除成功")
-            query_smt_reelup()
+            query_callback(None,None,reelsn)
         else:
             messagebox.showerror("错误", f"删除失败: {msg}")
         ui_user_action("delete_smt_reelup",target=f"删除索引为{index},料盘为{reelsn}的记录吗；",status=msg)
@@ -2093,6 +2192,362 @@ def insert_wo_material():
         confirm_callback=insert_callback,
         warning_msg="请至少输入一个条件"
     )
+def ui_rework():
+    """重工执行界面：左侧输入，右侧表格"""
+    global content_frame
+    query_data = {}
+    column_map = {
+        "工单": "WORK_ORDER",
+        "序号": "SERIAL_NUMBER",
+        "重工号": "REWORK_NO",
+        "QC号": "QC_NO",
+        "箱号": "CARTON_NO"
+    }
+    for widget in content_frame.winfo_children():
+        widget.destroy()
+
+    paned = ttk.PanedWindow(content_frame, orient=tk.HORIZONTAL)
+    paned.pack(fill=tk.BOTH, expand=True)
+
+    # ----- 左侧面板：输入区域 -----
+    left_frame = tk.Frame(paned)
+    paned.add(left_frame, weight=1)
+
+    input_panel = tk.Frame(left_frame)
+    input_panel.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+    # 新工单（复选框 + 输入框）
+    row_new_wo = tk.Frame(input_panel)
+    row_new_wo.pack(fill=tk.X, pady=5)
+    new_wo_var = tk.BooleanVar()
+    cb_new_wo = tk.Checkbutton(row_new_wo, text="新工单", variable=new_wo_var)
+    cb_new_wo.pack(side=tk.LEFT, padx=5)
+    entry_new_wo = tk.Entry(row_new_wo, width=20)
+    entry_new_wo.pack(side=tk.LEFT, padx=5)
+    # 重工单号 + 新增按钮
+    row1 = tk.Frame(input_panel)
+    row1.pack(fill=tk.X, pady=5)
+    tk.Label(row1, text="重工单号", width=10, anchor='e').pack(side=tk.LEFT)
+    entry_wo = tk.Entry(row1, width=20)
+    entry_wo.pack(side=tk.LEFT, padx=5)
+
+    def on_new_click():
+        msg, rework_no = module_oracle.get_rework_no()
+        if msg == "OK":
+            entry_wo.delete(0, tk.END)
+            entry_wo.insert(0, rework_no)
+        else:
+            messagebox.showerror("错误", f"生成重工号失败: {msg}")
+
+    btn_new = tk.Button(row1, text="新增", command=on_new_click)
+    btn_new.pack(side=tk.LEFT, padx=5)
+    # 输入类型选择 创建下拉框时，从字典键生成选项列表
+    row_type = tk.Frame(input_panel)
+    row_type.pack(fill=tk.X, pady=2)
+    tk.Label(row_type, text="类型选择：", width=10, anchor='e').pack(side=tk.LEFT)
+    combo_type = ttk.Combobox(row_type, values=list(column_map.keys()), width=12)
+    combo_type.current(0)  # 默认选择第一个
+    combo_type.pack(side=tk.LEFT, padx=5)
+
+    # 输入框
+    row_input = tk.Frame(input_panel)
+    row_input.pack(fill=tk.X, pady=2)
+    tk.Label(row_input, text="输入：", width=10, anchor='e').pack(side=tk.LEFT)
+    entry_input = tk.Entry(row_input, width=25)
+    entry_input.pack(side=tk.LEFT, padx=5)
+
+    def on_input_execute(event=None):
+        input_type = combo_type.get()
+        input_value = entry_input.get().strip()
+        if not input_value:
+            return
+        
+        if input_type in column_map:
+            if '-' in input_value:
+                prefix, start_num, end_num, width = parse_range_string(input_value)
+                valid_values = []
+                failed_values = []
+                for num in range(start_num, end_num + 1):
+                    val = prefix + str(num).zfill(width)
+                    check_result = module_oracle.check_exists_in_status(column_map, input_type, val)
+                    if check_result != "OK":
+                        failed_values.append(val)
+                    else:
+                        valid_values.append(val)
+                if failed_values:
+                    messagebox.showerror("检查失败", f"以下值不存在: {', '.join(failed_values)}")
+                    return
+                # 全部通过，添加
+                if input_type not in query_data:
+                    query_data[input_type] = []
+                query_data[input_type].extend(valid_values)
+            else:
+                check_result = module_oracle.check_exists_in_status(column_map,input_type, input_value)
+                if check_result != "OK":
+                    messagebox.showerror("检查失败", check_result)
+                    return  # 停止后续操作
+                if input_type not in query_data:
+                    query_data[input_type] = []
+                query_data[input_type].append(input_value)
+
+        msg, cols, rows = module_oracle.fetch_rework_sn(query_data,column_map)
+        if msg == "OK":
+            route_name = check_route_uniqueness(cols,rows)
+            if route_name:
+                entry_route.delete(0, tk.END)
+                entry_route.insert(0, route_name)
+                on_route_enter(None)
+            update_result_table(rows)
+        entry_input.delete(0, tk.END)
+        update_display()
+
+    entry_input.bind('<Return>', on_input_execute)
+
+    row_qty = tk.Frame(input_panel)
+    row_qty.pack(fill=tk.X, pady=2)
+    tk.Label(row_qty, text="数量：", width=10, anchor='e').pack(side=tk.LEFT)
+    entry_qty = tk.Entry(row_qty, width=8, fg='red')   # 文字颜色红色
+    entry_qty.insert(0, "0")
+    entry_qty.config(state='readonly')   # 只读
+    entry_qty.pack(side=tk.LEFT, padx=5)
+
+    # 在数量行之后，添加输入条件表格
+    frame_cond_display = tk.LabelFrame(input_panel, text="已输入查询条件", padx=5, pady=5)
+    frame_cond_display.pack(fill=tk.BOTH, expand=True, pady=5)  # 让它可以扩展
+
+    # 创建Treeview
+    tree_cond = ttk.Treeview(frame_cond_display, columns=("类型", "值"), show="headings", height=5)
+    tree_cond.heading("类型", text="类型")
+    tree_cond.heading("值", text="值")
+    tree_cond.column("类型", width=60, anchor="center")
+    tree_cond.column("值", width=120, anchor="w")
+
+    # 滚动条
+    vsb_cond = ttk.Scrollbar(frame_cond_display, orient="vertical", command=tree_cond.yview)
+    tree_cond.configure(yscrollcommand=vsb_cond.set)
+
+    tree_cond.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    vsb_cond.pack(side=tk.RIGHT, fill=tk.Y)
+
+    def update_display():
+        """更新条件表格"""
+        for item in tree_cond.get_children():
+            tree_cond.delete(item)
+        for typ, values in query_data.items():
+            for val in values:
+                tree_cond.insert("", tk.END, values=(typ, val))
+
+    # 初始调用
+    update_display()
+
+    # 重工条件（复选框）
+    frame_condition = tk.LabelFrame(input_panel, text="重工条件", padx=5, pady=5)
+    frame_condition.pack(fill=tk.X, pady=10)
+    conditions = [
+        "清除出库序号",
+        "包装（清除栈板、外箱、彩盒）",
+        "抽验（清除抽验）",
+        "清除MAC",
+        "料件",
+    ]
+    check_vars = []
+    for text in conditions:
+        var = tk.BooleanVar()
+        cb = tk.Checkbutton(frame_condition, text=text, variable=var)
+        cb.pack(anchor='w', padx=5, pady=2)  # 左对齐，每个复选框占一行
+        check_vars.append(var)
+
+    # 重工流程：流程名称（输入框） + 投入制程（下拉选择）
+    frame_route = tk.Frame(input_panel)
+    frame_route.pack(fill=tk.X, pady=5)
+    # 第一行：流程名称（输入框）
+    row_route_name = tk.Frame(frame_route)
+    row_route_name.pack(fill=tk.X, pady=2)
+    tk.Label(row_route_name, text="流程名称", width=10, anchor='e').pack(side=tk.LEFT)
+    entry_route = tk.Entry(row_route_name, width=18)
+    entry_route.pack(side=tk.LEFT, padx=5)
+    # 第二行：投入制程（下拉选择）
+    row_route_process = tk.Frame(frame_route)
+    row_route_process.pack(fill=tk.X, pady=2)
+    tk.Label(row_route_process, text="投入制程", width=10, anchor='e').pack(side=tk.LEFT)
+    combo_process = ttk.Combobox(row_route_process, values=[], width=18)
+    combo_process.set('')  # 默认空
+    combo_process.pack(side=tk.LEFT, padx=5)
+    def on_route_enter(event):
+        route_name = entry_route.get().strip()
+        if route_name:
+            try:
+                columns, rows = module_oracle.fetch_route_steps_necessary(route_name)
+                if columns and rows:
+                    # 查找 PROCESS_NAME 列的索引
+                    idx = None
+                    for col in ["PROCESS_NAME"]:
+                        if col in columns:
+                            idx = columns.index(col)
+                            break
+                    if idx is not None:
+                        processes = [row[idx] for row in rows]
+                        # 去重并保留顺序
+                        processes = list(dict.fromkeys(processes))
+                        combo_process['values'] = processes
+                        if processes:
+                            combo_process.current(0)
+                        else:
+                            combo_process.set('')
+                    else:
+                        combo_process['values'] = []
+                        combo_process.set('')
+                else:
+                    combo_process['values'] = []
+                    combo_process.set('')
+            except Exception as e:
+                messagebox.showerror("查询错误", f"查询流程步骤失败：{e}")
+                combo_process['values'] = []
+                combo_process.set('')
+        else:
+            combo_process['values'] = []
+            combo_process.set('')
+    entry_route.bind('<Return>', on_route_enter)
+    # 执行按钮
+    def on_execute():
+        """收集所有输入信息并打印/处理"""
+        # 先获取各字段值
+        rework_no = entry_wo.get().strip()
+        qty_str = entry_qty.get().strip()
+        route_name = entry_route.get().strip()
+        process = combo_process.get().strip()
+        is_new_wo = new_wo_var.get()
+        new_wo_no = entry_new_wo.get().strip()
+        # 校验必填项
+        if not rework_no:
+            messagebox.showwarning("提示", "重工单号不能为空")
+            return
+        if not qty_str or qty_str == "0":
+            messagebox.showwarning("提示", "数量不能为0，请先查询有效数据")
+            return
+        if not route_name:
+            messagebox.showwarning("提示", "流程名称不能为空")
+            return
+        if not process:
+            messagebox.showwarning("提示", "投入制程不能为空")
+            return
+        # 若勾选了新工单，则新工单号不能为空
+        if is_new_wo and not new_wo_no:
+            messagebox.showwarning("提示", "已勾选新工单，请输入新工单号")
+            return
+        # 构建 info 字典
+        info = {
+            "重工单号": rework_no,
+            "新工单": is_new_wo,
+            "新工单号": new_wo_no,
+            "数量": qty_str,
+            "流程名称": route_name,
+            "投入制程": process,
+            "重工条件": [],
+            "查询条件": query_data
+        }
+        # 收集复选框状态
+        for idx, text in enumerate(conditions):
+            if check_vars[idx].get():
+                info["重工条件"].append(text)
+        if show_confirm_dialog(info):
+            print("用户确认执行，开始处理...")
+        else:
+            print("用户取消操作")
+
+    btn_execute = tk.Button(input_panel, text="执行", bg="#4CAF50", fg="white", width=10, command=on_execute)
+    btn_execute.pack(pady=20)
+
+    # ----- 右侧面板：表格区域 -----
+    right_frame = tk.Frame(paned)
+    paned.add(right_frame, weight=3)
+
+    table_frame = tk.Frame(right_frame)
+    table_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+    columns = [
+        "序号", "工单", "料号", "生产线", "WIP 制程", "制程类别", "工作站", "出货序号",
+        "栈板号", "箱线", "彩盒", "生产线产出时间", "流程名称"
+    ]
+    tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=15)
+    for col in columns:
+        tree.heading(col, text=col)
+        tree.column(col, width=80, anchor="center", minwidth=60)
+
+    vsb = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+    hsb = ttk.Scrollbar(table_frame, orient="horizontal", command=tree.xview)
+    tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+    tree.grid(row=0, column=0, sticky="nsew")
+    vsb.grid(row=0, column=1, sticky="ns")
+    hsb.grid(row=1, column=0, sticky="ew")
+
+    table_frame.grid_rowconfigure(0, weight=1)
+    table_frame.grid_columnconfigure(0, weight=1)
+
+    global result_tree
+    result_tree = tree
+
+    def update_result_table(data):
+        for item in result_tree.get_children():
+            result_tree.delete(item)
+        for row in data:
+            result_tree.insert("", tk.END, values=row)
+        entry_qty.config(state='normal')
+        entry_qty.delete(0, tk.END)
+        entry_qty.insert(0, str(len(data)))
+        entry_qty.config(state='readonly')
+    def show_confirm_dialog(info):
+        """
+        显示一个确认窗口，展示所有输入信息，并返回 True（确定）或 False（取消）
+        :param info: 包含所有输入信息的字典
+        :return: bool
+        """
+        win = tk.Toplevel(root)
+        win.title("确认执行")
+        win.geometry("500x400")
+        win.transient(root)
+        win.grab_set()
+        # 格式化信息
+        lines = []
+        for key, value in info.items():
+            if key == "查询条件":
+                lines.append(f"\n{key}:")
+                if isinstance(value, dict):
+                    for k, v in value.items():
+                        lines.append(f"  {k}: {', '.join(v)}")
+                else:
+                    lines.append(f"  {value}")
+            elif key == "重工条件":
+                if value:
+                    lines.append(f"\n{key}: {', '.join(value)}")
+                else:
+                    lines.append(f"\n{key}: (无)")
+            elif isinstance(value, bool):
+                lines.append(f"{key}: {'是' if value else '否'}")
+            else:
+                lines.append(f"{key}: {value}")
+        text = tk.Text(win, wrap=tk.WORD, padx=10, pady=10, height=15)
+        text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        text.insert(tk.END, "\n".join(lines))
+        text.config(state=tk.DISABLED)
+        # 按钮框架
+        btn_frame = tk.Frame(win)
+        btn_frame.pack(pady=10)
+        result = False
+        def on_ok():
+            nonlocal result
+            result = True
+            win.destroy()
+        def on_cancel():
+            nonlocal result
+            result = False
+            win.destroy()
+        btn_ok = tk.Button(btn_frame, text="确定", command=on_ok, width=10, bg="#4CAF50", fg="white")
+        btn_ok.pack(side=tk.LEFT, padx=10)
+        btn_cancel = tk.Button(btn_frame, text="取消", command=on_cancel, width=10)
+        btn_cancel.pack(side=tk.LEFT, padx=10)
+        win.wait_window()
+        return result
 # ---------- 主函数 -----------
 def main():
     global root, content_frame, status_label, user_label,menubar
