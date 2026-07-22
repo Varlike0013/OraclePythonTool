@@ -395,8 +395,6 @@ def delete_sn_mac(sn,mac):
         return False, "SN 和 MAC 不能为空"
     sql = """
         DELETE FROM SAJET.G_WO_MAC M
-        LEFT JOIN SAJET.G_SN_STATUS S ON S.SERIAL_NUMBER = M.SERIAL_NUMBER
-        LEFT JOIN SAJET.SYS_PROCESS R ON R.PROCESS_ID = S.WIP_PROCESS
         WHERE M.SERIAL_NUMBER = :sn OR MAC = :mac
     """
     try:
@@ -424,8 +422,6 @@ def delete_mac_rework(rewk):
         return "重工号 不能为空",[], []
     sql = """
         DELETE FROM SAJET.G_WO_MAC M
-        LEFT JOIN SAJET.G_SN_STATUS S ON S.SERIAL_NUMBER = M.SERIAL_NUMBER
-        LEFT JOIN SAJET.SYS_PROCESS R ON R.PROCESS_ID = S.WIP_PROCESS
         WHERE M.SERIAL_NUMBER IN (SELECT SERIAL_NUMBER FROM SAJET.G_SN_STATUS WHERE REWORK_NO = :rewk)
         AND R.PROCESS_NAME = 'F1Test'
     """

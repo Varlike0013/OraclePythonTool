@@ -2,10 +2,10 @@
 
 
 a = Analysis(
-    ['varlike.py'],
+    ['Varlike.py'],
     pathex=[],
     binaries=[],
-    datas=[('./instantclient_19_31', 'instantclient_19_31'),('./favicon.ico','.')],
+    datas=[('./instantclient_19_31', 'instantclient_19_31'),('./favicon.ico', 'favicon.ico')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -21,7 +21,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='varlike',
+    name='Varlike',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -41,5 +41,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='varlike',
+    name='Varlike',
 )

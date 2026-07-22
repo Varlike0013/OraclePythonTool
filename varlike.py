@@ -14,6 +14,7 @@ import module_login
 import module_save
 import module_timer
 import module_thread
+import module_version
 
 # ---------- 全局变量（用于跨函数共享）----------
 content_frame = None         # 内容区域框架
@@ -193,6 +194,7 @@ def build_menu():
             menubar.add_cascade(label="其他", menu=other_menu)
             other_menu.add_command(label="更新ASUS列印", command=update_erp_asus)
             other_menu.add_command(label="添加风扇或散热片料件", command=insert_wo_material)
+            other_menu.add_command(label="检查版本更新", command=check_update_version)
             #重工
             menubar.add_command(label="重工执行", command=ui_rework)
         else:
@@ -204,6 +206,8 @@ def update_status_safe(text):
         status_label.config(text=text)
     else:
         root.after(0, lambda: status_label.config(text=text))
+def update_user_label(text):
+    user_label.config(text=f"{text};版本 {module_version.VERSION} 就绪")
 def _ui_input_one(title, confirm_callback,
                   label="输入:", btn_text="确定", warning_msg="请输入内容"):
     """
@@ -1015,7 +1019,7 @@ def re_login():
     dlg = LoginDialog(root, title="登录")
     if dlg.result:
         # 更新界面
-        user_label.config(text=f"当前用户: {module_login.current_user}")
+        update_user_label(f"当前用户: {module_login.current_user}")
         status_label.config(text="登录成功")
         for widget in content_frame.winfo_children():
             widget.destroy()
@@ -1029,7 +1033,7 @@ def user_logout():
     ui_user_action("user_logout",target=f"用户{module_login.current_user}退出系统",status="OK")
     module_login.logout()
     build_menu()
-    user_label.config(text="当前用户: 未登录")
+    update_user_label("当前用户: 未登录")
     for widget in content_frame.winfo_children():
         widget.destroy()
     label = tk.Label(content_frame, text="已注销，请点击「登录」重新登录")
@@ -1503,14 +1507,14 @@ def ui_clear_mac():
         menu.add_command(label=f"复制 {col_name}", command=lambda: root.clipboard_append(cell_value))
         menu.add_command(label="查看当前值", command=lambda: show_cell_value(cell_value,col_name))
 
-        if module_login.is_logined() and sn and mac and process=="F1Test":
+        if sn and mac and process=="F1Test":
             menu.add_separator()
-            menu.add_command(label="删除 MAC",command=lambda s=sn, m=mac: delete_mac_action(s, m, tree))
-        elif module_login.is_logined():
+            menu.add_command(label="删除 MAC",command=lambda s=sn, m=mac: delete_mac_action(s, m))
+        else :
             menu.add_separator()
             menu.add_command(label="删除 MAC", state="disabled")
 
-    def delete_mac_action(sn, mac, tree):
+    def delete_mac_action(sn, mac):
         """执行删除 MAC 操作"""
         if not messagebox.askyesno("确认删除", f"确定要删除 SN={sn}, MAC={mac} 吗？"):
             return
@@ -2192,16 +2196,30 @@ def insert_wo_material():
         confirm_callback=insert_callback,
         warning_msg="请至少输入一个条件"
     )
+def check_update_version():
+    status, msg = module_version.check_version_status()
+    if status == 1:
+        if messagebox.askyesno("更新提示", f"{msg}\n\n是否立即更新？"):
+            success, msg = module_version.perform_update()
+            if success:
+                if "重启" in msg:
+                    sys.exit(0)  # 退出当前进程，让批处理接管
+                else:
+                    messagebox.showinfo("更新完成", msg)
+            else:
+                messagebox.showerror("更新失败", msg)
+    elif status == -1:
+        messagebox.showerror("检查更新失败", msg) # 无法获取云端版本
 def ui_rework():
     """重工执行界面：左侧输入，右侧表格"""
     global content_frame
     query_data = {}
     column_map = {
-        "工单": "WORK_ORDER",
         "序号": "SERIAL_NUMBER",
+        "箱号": "CARTON_NO",
+        "工单": "WORK_ORDER",
         "重工号": "REWORK_NO",
-        "QC号": "QC_NO",
-        "箱号": "CARTON_NO"
+        "QC号": "QC_NO"
     }
     for widget in content_frame.winfo_children():
         widget.destroy()
@@ -2262,24 +2280,28 @@ def ui_rework():
             return
         
         if input_type in column_map:
-            if '-' in input_value:
-                prefix, start_num, end_num, width = parse_range_string(input_value)
-                valid_values = []
-                failed_values = []
-                for num in range(start_num, end_num + 1):
-                    val = prefix + str(num).zfill(width)
-                    check_result = module_oracle.check_exists_in_status(column_map, input_type, val)
-                    if check_result != "OK":
-                        failed_values.append(val)
-                    else:
-                        valid_values.append(val)
-                if failed_values:
-                    messagebox.showerror("检查失败", f"以下值不存在: {', '.join(failed_values)}")
-                    return
-                # 全部通过，添加
-                if input_type not in query_data:
-                    query_data[input_type] = []
-                query_data[input_type].extend(valid_values)
+            if '-' in input_value :
+                if column_map[input_type] == "CARTON_NO" or column_map[input_type]  == "SERIAL_NUMBER":
+                    prefix, start_num, end_num, width = parse_range_string(input_value)
+                    valid_values = []
+                    failed_values = []
+                    for num in range(start_num, end_num + 1):
+                        val = prefix + str(num).zfill(width)
+                        check_result = module_oracle.check_exists_in_status(column_map, input_type, val)
+                        if check_result != "OK":
+                            failed_values.append(val)
+                        else:
+                            valid_values.append(val)
+                    if failed_values:
+                        messagebox.showerror("检查失败", f"以下值不存在: {', '.join(failed_values)}")
+                        return
+                    # 全部通过，添加
+                    if input_type not in query_data:
+                        query_data[input_type] = []
+                    query_data[input_type].extend(valid_values)
+                else:
+                    messagebox.showerror("检查失败", "输入不合规")
+                    return  # 停止后续操作
             else:
                 check_result = module_oracle.check_exists_in_status(column_map,input_type, input_value)
                 if check_result != "OK":
@@ -2559,6 +2581,8 @@ def main():
     root.iconbitmap(icon_path)
     
     module_thread.init(root)
+    #加载版本号
+    module_save.save_app_version(module_version.VERSION)
     # 加载窗口配置
     config = module_save.load_config()
     win_cfg = config['settings']['window']
@@ -2590,6 +2614,7 @@ def main():
     status_label = tk.Label(bottom_frame, text="就绪", bd=1, relief=tk.SUNKEN, anchor=tk.W)
     status_label.pack(side=tk.TOP, fill=tk.X)
     user_label = tk.Label(bottom_frame, text=f"当前用户: {user_display}", bd=1, relief=tk.SUNKEN, anchor=tk.W)
+    update_user_label(f"当前用户: {module_login.current_user}")
     user_label.pack(side=tk.TOP, fill=tk.X)
     # 加载配置
     config = module_save.load_config()
